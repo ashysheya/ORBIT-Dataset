@@ -212,8 +212,9 @@ class PrototypicalClassifier(HeadClassifier):
         Function that passes a batch of target features through linear classification layer to get logits over object classes for each feature.
         :param target_features: (torch.Tensor) Batch of target features.
         :return: (torch.Tensor) Logits over object classes for each target feature.
-        """ 
-        return F.linear(target_features, self.param_dict['weight'], self.param_dict['bias'])
+        """
+        distances = (target_features[:, None] - self.param_dict['means'][None]).pow(2).sum(dim=2)
+        return -distances
 
     def configure(self, context_features, context_labels, ops_counter=None):
         """
@@ -226,8 +227,7 @@ class PrototypicalClassifier(HeadClassifier):
         assert context_features.size(0) == context_labels.size(0), "context features and labels are different sizes!" 
 
         class_rep_dict = self._build_class_reps(context_features, context_labels, ops_counter)
-        class_weight = []
-        class_bias = []
+        class_means = []
 
         label_set = list(class_rep_dict.keys())
         label_set.sort()
@@ -236,18 +236,9 @@ class PrototypicalClassifier(HeadClassifier):
         for class_num in label_set:
             t1 = time.time()
             # equation 8 from the prototypical networks paper
-            nu = class_rep_dict[class_num]
-            class_weight.append(2 * nu)
-            class_bias.append((-torch.matmul(nu, nu.t()))[None, None])
-            if ops_counter:
-                torch.cuda.synchronize()
-                ops_counter.log_time(time.time() - t1)
-                ops_counter.add_macs(nu.size(0) * nu.size(1)) # 2* in class weight
-                ops_counter.add_macs(nu.size(0)**2 * nu.size(1)) # matmul in  class bias
-                ops_counter.add_macs(nu.size(0) * nu.size(1)) # -1* in  class bias
+            class_means += [class_rep_dict[class_num]]
 
-        self.param_dict['weight'] = torch.cat(class_weight, dim=0)
-        self.param_dict['bias'] = torch.reshape(torch.cat(class_bias, dim=1), [num_classes, ])
+        self.param_dict['means'] = torch.cat(class_means, dim=0)
 
     def get_type(self):
         return 'proto'
