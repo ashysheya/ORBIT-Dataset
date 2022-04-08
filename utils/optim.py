@@ -16,7 +16,7 @@ def init_optimizer(model, lr, optimizer_type='adam', extractor_scale_factor=1.0)
     base_params = filter(lambda p: id(p) not in feature_extractor_params, model.parameters())
     optimizer_fn = optimizers[optimizer_type]
     optimizer = optimizer_fn([
-                        {'params': base_params },
+                        {'params': base_params},
                         {'params': model.feature_extractor.parameters(), 'lr': lr*extractor_scale_factor}
                         ], lr=lr)
     optimizer.zero_grad()

@@ -40,7 +40,8 @@ from models.normalisation_layers import TaskNorm
 from models.set_encoder import SetEncoder, NullSetEncoder
 from models.classifiers import LinearClassifier, VersaClassifier, PrototypicalClassifier, MahalanobisClassifier
 from utils.optim import init_optimizer
-from utils.data import get_clip_loader
+from utils.data import get_clip_loader, TaskResampler
+
 
 class FewShotRecogniser(nn.Module):
     """
@@ -302,6 +303,7 @@ class FewShotRecogniser(nn.Module):
         """
         self.classifier.reset()
 
+
 class MultiStepFewShotRecogniser(FewShotRecogniser):
     """
     Few-shot classification model that is personalised in multiple forward-backward steps (e.g. MAML, FineTuner).
@@ -317,24 +319,46 @@ class MultiStepFewShotRecogniser(FewShotRecogniser):
 
         self.num_grad_steps = num_grad_steps
 
-    def personalise(self, context_clips, context_clip_labels, learning_args, ops_counter=None):
+    def personalise(self, context_clips, context_clip_labels, learning_args, ops_counter=None, context_paths=None):
         """
         Function that learns a new task by taking a fixed number of gradient steps on the task's context set. For each task, a new linear classification layer is added (and FiLM layers if self.adapt_features == True).
         :param context_clips: (np.ndarray or torch.Tensor) Context clips (either as paths or tensors), each composed of self.clip_length contiguous frames.
         :param context_clip_labels: (torch.Tensor) Video-level labels for each context clip.
         :param learning_args: (float, func, str, float) Learning hyper-parameters including learning rate, loss function, optimiser type and factor to scale the extractor's learning rate.
         :param ops_counter: (utils.OpsCounter or None) Object that counts operations performed.
+        :param context_paths: (list::np.ndarray) context path for task sampler
         :return: Nothing.
         """
         lr, loss_fn, optimizer_type, extractor_scale_factor = learning_args
         num_classes = len(torch.unique(context_clip_labels))
+
+        if self.classifier.get_type() == 'mahalanobis' or self.classifier.get_type() == 'proto':
+            need_task_resampling = True
+            task_resampler = TaskResampler(context_paths, context_clip_labels)
+        else:
+            need_task_resampling = False
+            context_clip_loader = get_clip_loader((context_clips, context_clip_labels), self.batch_size, with_labels=True)
+
         self.configure_classifier(num_classes, init_zeros=True)
         self.configure_feature_adapter()
         inner_loop_optimizer = init_optimizer(self, lr, optimizer_type, extractor_scale_factor)
+        scheduler = torch.optim.lr_scheduler.StepLR(inner_loop_optimizer, step_size=50, gamma=0.1)
+        # print(context_clips.shape, context_clip_labels.shape, torch.unique(context_clip_labels))
+        for j in range(self.num_grad_steps):
+            if need_task_resampling:
+                sampled_context_clips, sampled_context_labels, context_clip_loader = task_resampler.resample_task(context_clips, context_clip_labels, self.batch_size)
+                sampled_context_clips = sampled_context_clips.to(self.device)
+                sampled_context_labels = sampled_context_labels.to(self.device)
+            else:
+                sampled_context_clips = None
+                sampled_context_labels = None
 
-        context_clip_loader = get_clip_loader((context_clips, context_clip_labels), self.batch_size, with_labels=True)
-        for _ in range(self.num_grad_steps):
-            for batch_context_clips, batch_context_labels in context_clip_loader:
+            mean_loss = 0.0
+
+            for i, (batch_context_clips, batch_context_labels) in enumerate(context_clip_loader):
+                self.reconfigure_classifier(context_clips=sampled_context_clips, 
+                                            context_labels=sampled_context_labels, 
+                                            ops_counter=ops_counter)
                 batch_context_clips = batch_context_clips.to(self.device)
                 batch_context_labels = batch_context_labels.to(self.device)
                 batch_context_logits = self.predict_a_batch(batch_context_clips, ops_counter=ops_counter, context=True)
@@ -342,16 +366,23 @@ class MultiStepFewShotRecogniser(FewShotRecogniser):
                 batch_context_loss = loss_fn(batch_context_logits, batch_context_labels)
                 batch_context_loss.backward()
 
+                mean_loss += batch_context_loss.item()
+
                 if ops_counter:
                     torch.cuda.synchronize()
                     ops_counter.log_time(time.time() - t1)
 
+            # print('iter = ', j, 'mean loss = ', mean_loss/i, 'number_batches = ', i)
             t1 = time.time()
             inner_loop_optimizer.step()
             inner_loop_optimizer.zero_grad()
+            scheduler.step()
             if ops_counter:
                 torch.cuda.synchronize()
                 ops_counter.log_time(time.time() - t1)
+
+        with torch.no_grad():
+            self.reconfigure_classifier_in_batches(context_clips, context_clip_labels, ops_counter)
 
     def predict(self, clips, ops_counter=None, context=False):
         """
@@ -392,7 +423,52 @@ class MultiStepFewShotRecogniser(FewShotRecogniser):
         :init_zeros: (bool) If True, initialise classification layer with zeros, otherwise use Kaiming uniform.
         :return: Nothing.
         """
-        self.classifier.configure(num_classes, self.device, init_zeros=init_zeros)
+        if self.classifier.get_type() != 'mahalanobis' and self.classifier.get_type() != 'proto':
+            self.classifier.configure(num_classes, self.device, init_zeros=init_zeros)
+        else:
+            self.classifier._init_layers()
+            self.classifier.to(self.device)
+
+    def reconfigure_classifier(self, context_clips, context_labels, ops_counter):
+        """
+        Function that initialises and appends a linear classification layer to the model.
+        :param num_classes: (int) Number of classes in classification layer.
+        :init_zeros: (bool) If True, initialise classification layer with zeros, otherwise use Kaiming uniform.
+        :return: Nothing.
+        """
+        if self.classifier.get_type() == 'mahalanobis' or self.classifier.get_type() == 'proto':
+            self.feature_adapter_params = self._get_feature_adapter_params(None, ops_counter)
+            features = self._get_features(context_clips, self.feature_adapter_params, ops_counter, context=True)
+            # features = self._pool_features(features, ops_counter)
+            self.classifier.configure(features, context_labels, ops_counter)
+    # def reconfigure_classifier(self, context_clips, context_labels, ops_counter):
+    #     """
+    #     Function that initialises and appends a linear classification layer to the model.
+    #     :param num_classes: (int) Number of classes in classification layer.
+    #     :init_zeros: (bool) If True, initialise classification layer with zeros, otherwise use Kaiming uniform.
+    #     :return: Nothing.
+    #     """
+    #     if self.classifier.get_type() == 'mahalanobis' or self.classifier.get_type() == 'proto':
+    #         self.feature_adapter_params = self._get_feature_adapter_params(None, ops_counter)
+    #         num_backprop_clips = self.batch_size
+    #         random_idxs = torch.randperm(len(context_clips))
+    #         bp_tensor = context_clips[random_idxs[:num_backprop_clips]]
+    #         non_bp_tensor = context_clips[random_idxs[num_backprop_clips:]]
+    #         bp_features = self._get_features(bp_tensor, self.feature_adapter_params, ops_counter, context=True)
+    #         with torch.no_grad():
+    #             non_bp_features = self._get_features(non_bp_tensor, self.feature_adapter_params, ops_counter, context=True)
+    #         features = torch.cat([bp_features, non_bp_features], dim=0)
+    #         features = self._pool_features(features, ops_counter)
+    #         self.classifier.configure(features, context_labels[random_idxs], ops_counter)
+
+    def reconfigure_classifier_in_batches(self, clips, labels, ops_counter=None):
+        if self.classifier.get_type() == 'mahalanobis' or self.classifier.get_type() == 'proto':
+            clip_loader = get_clip_loader(clips, self.batch_size)
+            task_embedding = None  # multi-step methods do not use set encoder
+            self.feature_adapter_params = self._get_feature_adapter_params(task_embedding, ops_counter)
+            features = self._get_features_in_batches(clip_loader, self.feature_adapter_params, ops_counter, context=True)
+            features = self._pool_features(features, ops_counter)
+            self.classifier.configure(features, labels.to(self.device), ops_counter)
 
     def configure_feature_adapter(self):
         """
@@ -402,6 +478,7 @@ class MultiStepFewShotRecogniser(FewShotRecogniser):
         if self.adapt_features and self.feature_adaptation_method == 'learn':
             self.feature_adapter._init_layers()
             self.feature_adapter.to(self.device)
+
 
 class SingleStepFewShotRecogniser(FewShotRecogniser):
     """

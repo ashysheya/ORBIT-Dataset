@@ -7,6 +7,7 @@ from PIL import Image
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms.functional as tv_F
+from collections import defaultdict
 
 class DatasetFromClipPaths(Dataset):
     def __init__(self, clip_paths, with_labels):
@@ -44,6 +45,199 @@ class DatasetFromClipPaths(Dataset):
     def __len__(self):
         return len(self.clip_paths)
 
+
+class TaskResampler:
+    def __init__(self, clip_paths, clip_labels):
+        self.clip_dict = defaultdict(defaultdict)
+        self.arrange_clips(clip_paths, clip_labels)
+
+    def arrange_clips(self, clip_paths, clip_labels):
+        for i, label in enumerate(clip_labels):
+            clip_name = '-'.join(clip_paths[i][0].split('-')[:-1])
+            l_np = int(label.numpy())
+            if clip_name in self.clip_dict[l_np]:
+                self.clip_dict[l_np][clip_name].append(i)
+            else:
+                self.clip_dict[l_np][clip_name] = [i]
+
+    def resample_task(self, clips, clip_labels, batch_size):
+        context_batch_size = batch_size*8
+        context_idx = torch.zeros_like(clip_labels) - 1.0
+        num_classes = len(self.clip_dict)
+        num_classes_per_task = num_classes
+        chosen_classes = np.random.choice(list(self.clip_dict.keys()), num_classes_per_task, replace=False)
+
+        num_clips_per_class = context_batch_size // num_classes_per_task
+
+        for label in chosen_classes:
+            num_videos_per_class = len(self.clip_dict[label])
+            num_context_videos_per_class = np.random.randint(min(3, num_videos_per_class - 1), num_videos_per_class)
+            if num_clips_per_class < num_context_videos_per_class:
+                num_context_videos_per_class = num_clips_per_class
+            if num_context_videos_per_class == 0:
+                num_context_videos_per_class = 1
+
+            video_idxs = np.random.choice(num_videos_per_class, size=num_context_videos_per_class, replace=False)
+            context_idx[clip_labels == label] = 0.0
+
+            # if num_context_videos_per_class < num_clips_per_class:
+            #     video_distr = np.random.choice(video_idxs, size=num_clips_per_class - num_context_videos_per_class)
+            #     video_distr = np.concatenate([video_idxs, video_distr])
+            # else:
+            #     video_distr = video_idxs.copy()
+            #
+            # assert len(video_distr) == num_clips_per_class
+            #
+            # for idx in video_idxs:
+            #     clip_name = sorted(list(self.clip_dict[label].keys()))[idx]
+            #     if num_videos_per_class > 1:
+            #         context_idx[self.clip_dict[label][clip_name]] = 2.0
+            #     num_clips_per_video = min((video_distr == idx).sum(), len(self.clip_dict[label][clip_name]))
+            #     clips_idx = np.random.choice(len(self.clip_dict[label][clip_name]),
+            #                                  num_clips_per_video,
+            #                                  replace=False)
+            #     context_idx[np.array(self.clip_dict[label][clip_name])[clips_idx]] = 1.0
+
+            all_clips_per_video = [0]
+            clip_choosing_dict = {}
+            for idx in sorted(video_idxs):
+                clip_name = sorted(list(self.clip_dict[label].keys()))[idx]
+                clip_idx = np.random.randint(0, len(self.clip_dict[label][clip_name]))
+                if num_videos_per_class > 1:
+                    context_idx[self.clip_dict[label][clip_name]] = 2.0
+
+                context_idx[np.array(self.clip_dict[label][clip_name])[clip_idx]] = 1.0
+                if len(self.clip_dict[label][clip_name]) > 1:
+                    clip_choosing_dict[clip_name] = self.clip_dict[label][clip_name][:clip_idx] + self.clip_dict[label][clip_name][clip_idx + 1:]
+                    all_clips_per_video += [all_clips_per_video[-1] + len(clip_choosing_dict[clip_name])]
+
+            video_distr = np.random.choice(all_clips_per_video[-1], min(all_clips_per_video[-1], num_clips_per_class - num_context_videos_per_class), replace=False)
+
+            for i, clip_name in enumerate(sorted(clip_choosing_dict)):
+                chosen_clips = np.bitwise_and(video_distr < all_clips_per_video[i + 1], video_distr >= all_clips_per_video[i])
+                chosen_clips = video_distr[chosen_clips] - all_clips_per_video[i]
+                chosen_idxs = np.array(clip_choosing_dict[clip_name])[chosen_clips]
+                context_idx[chosen_idxs] = 1.0
+
+        context_clips = clips[context_idx == 1.0]
+        context_labels = clip_labels[context_idx == 1.0]
+
+        frame_idx = np.random.randint(0, 8)
+        context_clips_sampled = context_clips[:, frame_idx: frame_idx + 1]
+        # context_clips_sampled = context_clips
+
+        context_labels_updated = context_labels.clone()
+        target_labels = clip_labels[context_idx == 0.0]
+        target_labels_updated = target_labels.clone()
+
+        target_loader = get_clip_loader((clips[context_idx == 0.0], target_labels_updated), batch_size, True)
+        return context_clips_sampled, context_labels_updated, target_loader
+
+    # def resample_task(self, clips, clip_labels, batch_size):
+    #     context_batch_size = batch_size*8
+    #     context_idx = torch.zeros_like(clip_labels) - 1.0
+    #     num_labels = len(self.clip_dict)
+    #     # num_classes_per_task = np.random.randint(low=min(5, num_labels), high=num_labels + 1)
+    #     num_classes_per_task = num_labels
+    #     chosen_classes = np.random.choice(list(self.clip_dict.keys()), num_classes_per_task, replace=False)
+    #
+    #     num_context_videos = np.random.randint(min(3, self.min_num_videos - 1), self.min_num_videos)
+    #
+    #     if num_context_videos > context_batch_size//num_classes_per_task:
+    #         num_context_videos = context_batch_size//num_classes_per_task
+    #
+    #     num_clips_per_video = context_batch_size//(num_classes_per_task*num_context_videos)
+    #     for label in chosen_classes:
+    #         video_idxs = np.random.choice(len(self.clip_dict[label]), num_context_videos, replace=False)
+    #         context_idx[clip_labels == label] = 0.0
+    #         for idx in video_idxs:
+    #             clip_name = list(self.clip_dict[label].keys())[idx]
+    #             context_idx[self.clip_dict[label][clip_name]] = 2.0
+    #             clips_idx = np.random.choice(len(self.clip_dict[label][clip_name]),
+    #                                          min(num_clips_per_video, len(self.clip_dict[label][clip_name])),
+    #                                          replace=False)
+    #
+    #             context_idx[np.array(self.clip_dict[label][clip_name])[clips_idx]] = 1.0
+    #
+    #     context_clips = clips[context_idx == 1.0]
+    #     context_labels = clip_labels[context_idx == 1.0]
+    #
+    #     frame_idx = np.random.randint(0, 8)
+    #     context_clips_sampled = context_clips[:, frame_idx: frame_idx + 1]
+    #
+    #     context_labels_updated = context_labels.clone()
+    #     target_labels = clip_labels[context_idx == 0.0]
+    #     target_labels_updated = target_labels.clone()
+    #     # for i, label in enumerate(chosen_classes):
+    #     #     context_labels_updated[context_labels == label] = i
+    #     #     target_labels_updated[target_labels == label] = i
+    #
+    #     target_loader = get_clip_loader((clips[context_idx == 0.0], target_labels_updated), batch_size, True)
+    #     return context_clips_sampled, context_labels_updated, target_loader
+
+# class TaskResampler:
+#     def __init__(self, clip_paths, clip_labels):
+#         self.clip_dict = defaultdict(defaultdict)
+#         self.arrange_clips(clip_paths, clip_labels)
+
+#     def arrange_clips(self, clip_paths, clip_labels):
+#         for i, label in enumerate(clip_labels):
+#             clip_name = '-'.join(clip_paths[i][0].split('-')[:-1])
+#             l_np = int(label.numpy())
+#             if clip_name in self.clip_dict[l_np]:
+#                 self.clip_dict[l_np][clip_name].append(i)
+#             else:
+#                 self.clip_dict[l_np][clip_name] = [i]
+#         min_num_videos = 100
+#         for label in self.clip_dict:
+#             if len(self.clip_dict[label]) < min_num_videos:
+#                 min_num_videos = len(self.clip_dict[label])
+#         self.min_num_videos = min_num_videos
+
+#     def resample_task(self, clips, clip_labels, batch_size):
+#         context_batch_size = batch_size*8
+#         context_idx = torch.zeros_like(clip_labels) - 1.0
+#         num_labels = len(self.clip_dict)
+#         # num_classes_per_task = np.random.randint(low=min(5, num_labels), high=num_labels + 1)
+#         num_classes_per_task = num_labels
+#         chosen_classes = np.random.choice(list(self.clip_dict.keys()), num_classes_per_task, replace=False)
+
+#         num_context_videos = np.random.randint(min(3, self.min_num_videos - 1), self.min_num_videos)
+
+#         if num_context_videos > context_batch_size//num_classes_per_task:
+#             num_context_videos = context_batch_size//num_classes_per_task
+
+#         num_clips_per_video = context_batch_size//(num_classes_per_task*num_context_videos)
+#         for label in chosen_classes:
+#             video_idxs = np.random.choice(len(self.clip_dict[label]), num_context_videos, replace=False)
+#             context_idx[clip_labels == label] = 0.0
+#             for idx in video_idxs:
+#                 clip_name = list(self.clip_dict[label].keys())[idx]
+#                 context_idx[self.clip_dict[label][clip_name]] = 2.0
+#                 clips_idx = np.random.choice(len(self.clip_dict[label][clip_name]),
+#                                              min(num_clips_per_video, len(self.clip_dict[label][clip_name])),
+#                                              replace=False)
+
+#                 context_idx[np.array(self.clip_dict[label][clip_name])[clips_idx]] = 1.0
+
+#         context_clips = clips[context_idx == 1.0]
+#         context_labels = clip_labels[context_idx == 1.0]
+
+#         frame_idx = np.random.randint(0, 8)
+#         # context_clips_sampled = context_clips[:, frame_idx: frame_idx + 1]
+#         context_clips_sampled = context_clips
+
+#         context_labels_updated = context_labels.clone()
+#         target_labels = clip_labels[context_idx == 0.0]
+#         target_labels_updated = target_labels.clone()
+#         # for i, label in enumerate(chosen_classes):
+#         #     context_labels_updated[context_labels == label] = i
+#         #     target_labels_updated[target_labels == label] = i
+
+#         target_loader = get_clip_loader((clips[context_idx == 0.0], target_labels_updated), batch_size, True)
+#         return context_clips_sampled, context_labels_updated, target_loader
+
+
 def get_clip_loader(clips, batch_size, with_labels=False):
     if isinstance(clips[0], np.ndarray):
         clips_dataset = DatasetFromClipPaths(clips, with_labels=with_labels)
@@ -59,6 +253,7 @@ def get_clip_loader(clips, batch_size, with_labels=False):
             return list(zip(clips[0].split(batch_size), clips[1].split(batch_size)))
         else: 
             return clips.split(batch_size)
+
 
 def attach_frame_history(frames, history_length):
     

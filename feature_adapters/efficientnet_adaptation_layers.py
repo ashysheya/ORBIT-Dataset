@@ -28,6 +28,9 @@ class BaseFilmLayer(nn.Module):
         :return: (torch.scalar) L2-norm regularisation term.
         """
         l2_term = 0
+        if self.gamma_regularizers is None:
+            return l2_term
+
         for gamma_regularizer, beta_regularizer in zip(self.gamma_regularizers, self.beta_regularizers):
             l2_term += (gamma_regularizer ** 2).sum()
             l2_term += (beta_regularizer ** 2).sum()
@@ -53,14 +56,21 @@ class FilmLayer(BaseFilmLayer):
         Function that creates and initialises the FiLM layer. The FiLM layer has a nn.ParameterList() for its gammas and betas (and their corresponding regularisers). Each element in a nn.ParamaterList() is a nn.Parameter() of size self.num_maps and corresponds to one block in the FiLM layer.
         :return: Nothing.
         """
-        self.gammas, self.gamma_regularizers = nn.ParameterList(), nn.ParameterList()
-        self.betas, self.beta_regularizers = nn.ParameterList(), nn.ParameterList() 
-        
+        # self.gammas, self.gamma_regularizers = nn.ParameterList(), nn.ParameterList()
+        # self.betas, self.beta_regularizers = nn.ParameterList(), nn.ParameterList()
+        #
+        # for i in range(self.num_blocks):
+        #     self.gammas.append(nn.Parameter(torch.ones(self.num_maps[i]), requires_grad=True))
+        #     self.gamma_regularizers.append(nn.Parameter(nn.init.normal_(torch.empty(self.num_maps[i]), 0, 0.001), requires_grad=True))
+        #     self.betas.append(nn.Parameter(torch.zeros(self.num_maps[i]), requires_grad=True))
+        #     self.beta_regularizers.append(nn.Parameter(nn.init.normal_(torch.empty(self.num_maps[i]), 0, 0.001), requires_grad=True))
+        self.gammas = nn.ParameterList()
+        self.betas = nn.ParameterList()
+        self.gamma_regularizers, self.beta_regularizers = None, None
+
         for i in range(self.num_blocks):
             self.gammas.append(nn.Parameter(torch.ones(self.num_maps[i]), requires_grad=True))
-            self.gamma_regularizers.append(nn.Parameter(nn.init.normal_(torch.empty(self.num_maps[i]), 0, 0.001), requires_grad=True))
             self.betas.append(nn.Parameter(torch.zeros(self.num_maps[i]), requires_grad=True))
-            self.beta_regularizers.append(nn.Parameter(nn.init.normal_(torch.empty(self.num_maps[i]), 0, 0.001), requires_grad=True))
 
     def forward(self, x):
         """
@@ -68,12 +78,19 @@ class FilmLayer(BaseFilmLayer):
         :param x: (None) Not used.
         :return: (list::dict::nn.Parameter) Parameters of the FiLM layer.
         """
+        # block_params = []
+        # for block in range(self.num_blocks):
+        #     block_param_dict = {
+        #         'gamma': self.gammas[block] * self.gamma_regularizers[block] + torch.ones_like(self.gamma_regularizers[block]),
+        #         'beta': self.betas[block] * self.beta_regularizers[block]
+        #                     }
+        #     block_params.append(block_param_dict)
         block_params = []
         for block in range(self.num_blocks):
             block_param_dict = {
-                'gamma': self.gammas[block] * self.gamma_regularizers[block] + torch.ones_like(self.gamma_regularizers[block]),
-                'beta': self.betas[block] * self.beta_regularizers[block]
-                            }
+                'gamma': self.gammas[block],
+                'beta': self.betas[block]
+            }
             block_params.append(block_param_dict)
         return block_params
 

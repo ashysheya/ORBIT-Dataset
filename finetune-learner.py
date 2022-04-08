@@ -263,7 +263,6 @@ class Learner:
         num_test_tasks = self.test_queue.num_users * self.args.test_tasks_per_user
         for step, task_dict in enumerate(self.test_queue.get_tasks()):
             context_clips, context_paths, context_labels, target_frames_by_video, target_paths_by_video, target_labels_by_video, object_list = unpack_task(task_dict, self.device, context_to_device=False, preload_clips=self.args.preload_clips)
-            
             # if this is a user's first task, cache their target videos (as they remain constant for all their tasks - ie. num_test_tasks_per_user)
             if step % self.args.test_tasks_per_user == 0:
                 cached_target_frames_by_video, cached_target_paths_by_video, cached_target_labels_by_video = target_frames_by_video, target_paths_by_video, target_labels_by_video
@@ -273,8 +272,8 @@ class Learner:
 
             # adapt to current task by finetuning on context clips
             t1 = time.time()
-            learning_args=(self.args.inner_learning_rate, self.loss, 'sgd', 1.0)
-            finetuner.personalise(context_clips, context_labels, learning_args, ops_counter=self.ops_counter)
+            learning_args = (self.args.inner_learning_rate, self.loss, 'adam', 1.0)
+            finetuner.personalise(context_clips, context_labels, learning_args, ops_counter=self.ops_counter, context_paths=context_paths)
             self.ops_counter.log_time(time.time() - t1)
             # add task's ops to self.ops_counter
             self.ops_counter.task_complete()
@@ -292,6 +291,7 @@ class Learner:
                     print_and_log(self.logfile, f'{self.args.test_set} user {task_dict["user_id"]} ({self.test_evaluator.current_user+1}/{self.test_queue.num_users}) stats: {stats_to_str(current_user_stats)}')
                     if (step+1) < num_test_tasks:
                         self.test_evaluator.next_user()
+                    # exit()
 
         # get average performance over all users
         stats_per_user, stats_per_video = self.test_evaluator.get_mean_stats()

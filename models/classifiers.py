@@ -83,6 +83,9 @@ class LinearClassifier(nn.Module):
     def reset(self):
         self.linear = None
 
+    def get_type(self):
+        return 'linear'
+
 class HeadClassifier(nn.Module):
     """
     Class for a head-style classifier which is created by a computation of (context) features. Similar to https://github.com/cambridge-mlg/cnaps.
@@ -122,6 +125,9 @@ class HeadClassifier(nn.Module):
     @staticmethod
     def _mean_pooling(x):
         return torch.mean(x, dim=0, keepdim=True)
+
+    def get_type(self):
+        return 'head'
  
 class VersaClassifier(HeadClassifier):
     """
@@ -182,6 +188,9 @@ class VersaClassifier(HeadClassifier):
 
         self.param_dict['weight'] = torch.cat(class_weight, dim=0)
         self.param_dict['bias'] = torch.reshape(torch.cat(class_bias, dim=1), [num_classes, ])
+
+    def get_type(self):
+        return 'versa'
         
 class PrototypicalClassifier(HeadClassifier):
     """
@@ -193,9 +202,12 @@ class PrototypicalClassifier(HeadClassifier):
         :return: Nothing.
         """
         super().__init__()
+        self._init_layers()
+
+    def _init_layers(self):
         self.param_dict = {}
 
-    def predict(self, target_features):
+    def predict(self, target_features, ops_counter=None):
         """
         Function that passes a batch of target features through linear classification layer to get logits over object classes for each feature.
         :param target_features: (torch.Tensor) Batch of target features.
@@ -236,6 +248,9 @@ class PrototypicalClassifier(HeadClassifier):
 
         self.param_dict['weight'] = torch.cat(class_weight, dim=0)
         self.param_dict['bias'] = torch.reshape(torch.cat(class_bias, dim=1), [num_classes, ])
+
+    def get_type(self):
+        return 'proto'
         
 class MahalanobisClassifier(HeadClassifier):
     """
@@ -248,6 +263,12 @@ class MahalanobisClassifier(HeadClassifier):
         """
         super().__init__()
         self.param_dict = {}
+        self._init_layers()        
+
+    def _init_layers(self):
+        self.class_cov_weight = nn.Parameter(torch.tensor([0.5]), requires_grad=True)
+        self.task_cov_weight = nn.Parameter(torch.tensor([0.5]), requires_grad=True)
+        self.cov_reg_weight = nn.Parameter(torch.tensor([1.0]), requires_grad=True)
 
     def configure(self, context_features, context_labels, ops_counter=None):
         """
@@ -257,8 +278,7 @@ class MahalanobisClassifier(HeadClassifier):
         :param ops_counter: (utils.OpsCounter or None) Object that counts operations performed.
         :return: Nothing.
         """
-        assert context_features.size(0) == context_labels.size(0), "context features and labels are different sizes!" 
-
+        assert context_features.size(0) == context_labels.size(0), "context features and labels are different sizes!"
         means = []
         precisions = []
         task_covariance_estimate = self._estimate_cov(context_features, ops_counter)
@@ -269,12 +289,17 @@ class MahalanobisClassifier(HeadClassifier):
             class_features = torch.index_select(context_features, 0, self._extract_class_indices(context_labels, c))
             # mean pooling examples to form class means
             means.append(self._mean_pooling(class_features).squeeze())
-            lambda_k_tau = (class_features.size(0) / (class_features.size(0) + 1))
+            # lambda_k_tau = (class_features.size(0) / (class_features.size(0) + 1))
+            # class_covariance_estimate = self._estimate_cov(class_features, ops_counter)
+            # covariance_matrix = (lambda_k_tau * class_covariance_estimate) \
+            #                     + ((1 - lambda_k_tau) * task_covariance_estimate) \
+            #                     + torch.eye(class_features.size(1), device=class_features.device)
             class_covariance_estimate = self._estimate_cov(class_features, ops_counter)
-            covariance_matrix = (lambda_k_tau * class_covariance_estimate) \
-                                + ((1 - lambda_k_tau) * task_covariance_estimate) \
-                                + torch.eye(class_features.size(1), device=class_features.device)
+            covariance_matrix = F.relu(self.class_cov_weight) * class_covariance_estimate + \
+                                F.relu(self.task_cov_weight) * task_covariance_estimate + \
+                                F.relu(self.cov_reg_weight) * torch.eye(class_features.size(1), class_features.size(1)).cuda(0)
             precisions.append(torch.inverse(covariance_matrix))
+            # precisions.append(torch.inverse(covariance_matrix))
 
             if ops_counter:
                 torch.cuda.synchronize()
@@ -290,7 +315,7 @@ class MahalanobisClassifier(HeadClassifier):
         self.param_dict['means'] = (torch.stack(means))
         self.param_dict['precisions'] = (torch.stack(precisions))
          
-    def predict(self, target_features):
+    def predict(self, target_features, ops_counter=None):
         """
         Function that processes a batch of target features to get logits over object classes for each feature. Target features are classified by their Mahalanobis distance to the class means including the class precisions.
         :param target_features: (torch.Tensor) Batch of target features.
@@ -356,3 +381,6 @@ class MahalanobisClassifier(HeadClassifier):
             ops_counter.add_macs(examples.size(0) * examples.size(1)) # computing factor*cov_matrix
 
         return cov_matrix
+
+    def get_type(self):
+        return 'mahalanobis'

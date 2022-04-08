@@ -320,6 +320,8 @@ class ORBITDataset(Dataset):
         # get all frame paths from video
         frame_paths = self.vid2frames[video_path]
 
+        # print(video_path)
+
         # subsample frames by subsample_factor
         subsampled_frame_paths = frame_paths[0:self.frame_cap:self.subsample_factor]
 
@@ -330,7 +332,6 @@ class ORBITDataset(Dataset):
         num_subsampled_frames = len(subsampled_frame_paths)
         max_num_clips = num_subsampled_frames // self.clip_length
         assert num_subsampled_frames % self.clip_length == 0
-
         if num_clips == 'max': # select all non_overlapping clips from video
             sampled_paths = subsampled_frame_paths[:max_num_clips*self.clip_length]
             sampled_paths = np.array(sampled_paths).reshape((max_num_clips, self.clip_length))
