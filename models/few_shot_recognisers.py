@@ -342,7 +342,7 @@ class MultiStepFewShotRecogniser(FewShotRecogniser):
         self.configure_classifier(num_classes, init_zeros=True)
         self.configure_feature_adapter()
         inner_loop_optimizer = init_optimizer(self, lr, optimizer_type, extractor_scale_factor)
-        scheduler = torch.optim.lr_scheduler.StepLR(inner_loop_optimizer, step_size=50, gamma=0.1)
+        # scheduler = torch.optim.lr_scheduler.StepLR(inner_loop_optimizer, step_size=50, gamma=0.1)
         # print(context_clips.shape, context_clip_labels.shape, torch.unique(context_clip_labels))
         for j in range(self.num_grad_steps):
             if need_task_resampling:
@@ -376,7 +376,7 @@ class MultiStepFewShotRecogniser(FewShotRecogniser):
             t1 = time.time()
             inner_loop_optimizer.step()
             inner_loop_optimizer.zero_grad()
-            scheduler.step()
+            # scheduler.step()
             if ops_counter:
                 torch.cuda.synchronize()
                 ops_counter.log_time(time.time() - t1)

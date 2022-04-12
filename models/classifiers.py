@@ -34,6 +34,7 @@ import torch.nn.functional as F
 from collections import OrderedDict
 
 from models.mlps import DenseResidualBlock
+from torch.distributions import multivariate_normal
 
 class LinearClassifier(nn.Module):
     """
@@ -242,7 +243,8 @@ class PrototypicalClassifier(HeadClassifier):
 
     def get_type(self):
         return 'proto'
-        
+
+
 class MahalanobisClassifier(HeadClassifier):
     """
     Class for a Mahalanobis classifier (https://github.com/peymanbateni/simple-cnaps). Computes per-class distributions using context features. Target features are classified by the shortest Mahalanobis distance to these distributions.
@@ -253,11 +255,11 @@ class MahalanobisClassifier(HeadClassifier):
         :return: Nothing.
         """
         super().__init__()
-        self.param_dict = {}
-        self._init_layers()        
+        self._init_layers()
+        self.predict_nb = True
 
     def _init_layers(self):
-        self.class_cov_weight = nn.Parameter(torch.tensor([0.5]), requires_grad=True)
+        self.param_dict = {}
         self.task_cov_weight = nn.Parameter(torch.tensor([0.5]), requires_grad=True)
         self.cov_reg_weight = nn.Parameter(torch.tensor([1.0]), requires_grad=True)
 
@@ -273,45 +275,53 @@ class MahalanobisClassifier(HeadClassifier):
         means = []
         precisions = []
         task_covariance_estimate = self._estimate_cov(context_features, ops_counter)
-        
+
         for c in torch.unique(context_labels):
             t1 = time.time()
             # filter out feature vectors which have class c
             class_features = torch.index_select(context_features, 0, self._extract_class_indices(context_labels, c))
             # mean pooling examples to form class means
             means.append(self._mean_pooling(class_features).squeeze())
-            # lambda_k_tau = (class_features.size(0) / (class_features.size(0) + 1))
-            # class_covariance_estimate = self._estimate_cov(class_features, ops_counter)
-            # covariance_matrix = (lambda_k_tau * class_covariance_estimate) \
-            #                     + ((1 - lambda_k_tau) * task_covariance_estimate) \
-            #                     + torch.eye(class_features.size(1), device=class_features.device)
-            class_covariance_estimate = self._estimate_cov(class_features, ops_counter)
-            covariance_matrix = F.relu(self.class_cov_weight) * class_covariance_estimate + \
-                                F.relu(self.task_cov_weight) * task_covariance_estimate + \
-                                F.relu(self.cov_reg_weight) * torch.eye(class_features.size(1), class_features.size(1)).cuda(0)
-            precisions.append(torch.inverse(covariance_matrix))
-            # precisions.append(torch.inverse(covariance_matrix))
 
             if ops_counter:
                 torch.cuda.synchronize()
                 ops_counter.log_time(time.time() - t1)
                 ops_counter.add_macs(context_features.size(0)) # selecting class features
                 ops_counter.add_macs(class_features.size(0) * class_features.size(1)) # mean pooling
-                ops_counter.add_macs(1) # computing lambda_k_tau
-                ops_counter.add_macs(class_covariance_estimate.size(0) * class_covariance_estimate.size(1)) # lambda_k_tau * class_covariance_estimate
-                ops_counter.add_macs(task_covariance_estimate.size(0) * task_covariance_estimate.size(1)) # (1-lambda_k_tau) * task_covariance_estimate
-                ops_counter.add_macs(1/3*covariance_matrix.size(0) ** 3 + covariance_matrix.size(0) ** 2 - 4/3*covariance_matrix.size(0)) # computing inverse of covariance_matrix, taken from https://en.wikipedia.org/wiki/Gaussian_elimination#Computational_efficiency
-                # note, sum of 3 matrices to compute covariance_matrix is not included here
+
+
+        covariance_matrix = F.relu(self.task_cov_weight) * task_covariance_estimate + \
+                            F.relu(self.cov_reg_weight) * torch.eye(context_features.size(1),
+                                                                    context_features.size(1)).cuda(0)
+
+        if ops_counter:
+            ops_counter.add_macs(task_covariance_estimate.size(0) * task_covariance_estimate.size(1)) # lambda_k_tau * class_covariance_estimate
+            ops_counter.add_macs(1/3*covariance_matrix.size(0) ** 3 + covariance_matrix.size(0) ** 2 - 4/3*covariance_matrix.size(0)) # computing inverse of covariance_matrix, taken from https://en.wikipedia.org/wiki/Gaussian_elimination#Computational_efficiency
+            # note, sum of 3 matrices to compute covariance_matrix is not included here
 
         self.param_dict['means'] = (torch.stack(means))
-        self.param_dict['precisions'] = (torch.stack(precisions))
-         
+        self.param_dict['precisions'] = torch.inverse(covariance_matrix)[None]
+
     def predict(self, target_features, ops_counter=None):
         """
         Function that processes a batch of target features to get logits over object classes for each feature. Target features are classified by their Mahalanobis distance to the class means including the class precisions.
         :param target_features: (torch.Tensor) Batch of target features.
         :return: (torch.Tensor) Logits over object classes for each target feature.
-        """ 
+        """
+        if self.predict_nb:
+            return self.predict_naive_bayes(target_features, ops_counter)
+        else:
+            return self.predict_mahalanobis(target_features, ops_counter)
+
+    def predict_naive_bayes(self, target_features, ops_counter=None):
+        class_distributions = multivariate_normal.MultivariateNormal(
+            loc=self.param_dict['means'],
+            precision_matrix=self.param_dict['precisions']
+        )
+
+        return class_distributions.log_prob(target_features.unsqueeze(dim=1))
+
+    def predict_mahalanobis(self, target_features, ops_counter=None):
         # grabbing the number of classes and query examples for easier use later in the function
         number_of_classes = self.param_dict['means'].size(0)
         number_of_targets = target_features.size(0)
@@ -375,3 +385,136 @@ class MahalanobisClassifier(HeadClassifier):
 
     def get_type(self):
         return 'mahalanobis'
+        
+# class MahalanobisClassifier(HeadClassifier):
+#     """
+#     Class for a Mahalanobis classifier (https://github.com/peymanbateni/simple-cnaps). Computes per-class distributions using context features. Target features are classified by the shortest Mahalanobis distance to these distributions.
+#     """
+#     def __init__(self):
+#         """
+#         Creates instance of MahalanobisClassifier.
+#         :return: Nothing.
+#         """
+#         super().__init__()
+#         self.param_dict = {}
+#         self._init_layers()
+#
+#     def _init_layers(self):
+#         self.class_cov_weight = nn.Parameter(torch.tensor([0.5]), requires_grad=True)
+#         self.task_cov_weight = nn.Parameter(torch.tensor([0.5]), requires_grad=True)
+#         self.cov_reg_weight = nn.Parameter(torch.tensor([1.0]), requires_grad=True)
+#
+#     def configure(self, context_features, context_labels, ops_counter=None):
+#         """
+#         Function that computes a per-class distribution (mean, precision) using the context features.
+#         :param context_features: (torch.Tensor) Context features.
+#         :param context_labels: (torch.Tensor) Corresponding class labels for context features.
+#         :param ops_counter: (utils.OpsCounter or None) Object that counts operations performed.
+#         :return: Nothing.
+#         """
+#         assert context_features.size(0) == context_labels.size(0), "context features and labels are different sizes!"
+#         means = []
+#         precisions = []
+#         task_covariance_estimate = self._estimate_cov(context_features, ops_counter)
+#
+#         for c in torch.unique(context_labels):
+#             t1 = time.time()
+#             # filter out feature vectors which have class c
+#             class_features = torch.index_select(context_features, 0, self._extract_class_indices(context_labels, c))
+#             # mean pooling examples to form class means
+#             means.append(self._mean_pooling(class_features).squeeze())
+#             # lambda_k_tau = (class_features.size(0) / (class_features.size(0) + 1))
+#             # class_covariance_estimate = self._estimate_cov(class_features, ops_counter)
+#             # covariance_matrix = (lambda_k_tau * class_covariance_estimate) \
+#             #                     + ((1 - lambda_k_tau) * task_covariance_estimate) \
+#             #                     + torch.eye(class_features.size(1), device=class_features.device)
+#             class_covariance_estimate = self._estimate_cov(class_features, ops_counter)
+#             covariance_matrix = F.relu(self.class_cov_weight) * class_covariance_estimate + \
+#                                 F.relu(self.task_cov_weight) * task_covariance_estimate + \
+#                                 F.relu(self.cov_reg_weight) * torch.eye(class_features.size(1), class_features.size(1)).cuda(0)
+#             precisions.append(torch.inverse(covariance_matrix))
+#             # precisions.append(torch.inverse(covariance_matrix))
+#
+#             if ops_counter:
+#                 torch.cuda.synchronize()
+#                 ops_counter.log_time(time.time() - t1)
+#                 ops_counter.add_macs(context_features.size(0)) # selecting class features
+#                 ops_counter.add_macs(class_features.size(0) * class_features.size(1)) # mean pooling
+#                 ops_counter.add_macs(1) # computing lambda_k_tau
+#                 ops_counter.add_macs(class_covariance_estimate.size(0) * class_covariance_estimate.size(1)) # lambda_k_tau * class_covariance_estimate
+#                 ops_counter.add_macs(task_covariance_estimate.size(0) * task_covariance_estimate.size(1)) # (1-lambda_k_tau) * task_covariance_estimate
+#                 ops_counter.add_macs(1/3*covariance_matrix.size(0) ** 3 + covariance_matrix.size(0) ** 2 - 4/3*covariance_matrix.size(0)) # computing inverse of covariance_matrix, taken from https://en.wikipedia.org/wiki/Gaussian_elimination#Computational_efficiency
+#                 # note, sum of 3 matrices to compute covariance_matrix is not included here
+#
+#         self.param_dict['means'] = (torch.stack(means))
+#         self.param_dict['precisions'] = (torch.stack(precisions))
+#
+#     def predict(self, target_features, ops_counter=None):
+#         """
+#         Function that processes a batch of target features to get logits over object classes for each feature. Target features are classified by their Mahalanobis distance to the class means including the class precisions.
+#         :param target_features: (torch.Tensor) Batch of target features.
+#         :return: (torch.Tensor) Logits over object classes for each target feature.
+#         """
+#         # grabbing the number of classes and query examples for easier use later in the function
+#         number_of_classes = self.param_dict['means'].size(0)
+#         number_of_targets = target_features.size(0)
+#
+#         # calculate the Mahalanobis distance between target features and the class means including the class precision
+#         repeated_target = target_features.repeat(1, number_of_classes).view(-1, self.param_dict['means'].size(1))
+#         repeated_class_means = self.param_dict['means'].repeat(number_of_targets, 1)
+#         repeated_difference = (repeated_class_means - repeated_target)
+#         repeated_difference = repeated_difference.view(number_of_targets, number_of_classes,
+#                                                        repeated_difference.size(1)).permute(1, 0, 2)
+#         first_half = torch.matmul(repeated_difference, self.param_dict['precisions'])
+#         logits = torch.mul(first_half, repeated_difference).sum(dim=2).transpose(1, 0) * -1
+#
+#         return logits
+#
+#     @staticmethod
+#     def _estimate_cov(examples, ops_counter, rowvar=False, inplace=False):
+#         """
+#         SCM: unction based on the suggested implementation of Modar Tensai
+#         and his answer as noted in: https://discuss.pytorch.org/t/covariance-and-gradient-support/16217/5
+#         Estimate a covariance matrix given data.
+#         Covariance indicates the level to which two variables vary together.
+#         If we examine N-dimensional samples, `X = [x_1, x_2, ... x_N]^T`,
+#         then the covariance matrix element `C_{ij}` is the covariance of
+#         `x_i` and `x_j`. The element `C_{ii}` is the variance of `x_i`.
+#         Args:
+#             examples: A 1-D or 2-D array containing multiple variables and observations.
+#                 Each row of `m` represents a variable, and each column a single
+#                 observation of all those variables.
+#             rowvar: If `rowvar` is True, then each row represents a
+#                 variable, with observations in the columns. Otherwise, the
+#                 relationship is transposed: each column represents a variable,
+#                 while the rows contain observations.
+#         Returns:
+#             The covariance matrix of the variables.
+#         """
+#         t1 = time.time()
+#         if examples.dim() > 2:
+#             raise ValueError('m has more than 2 dimensions')
+#         if examples.dim() < 2:
+#             examples = examples.view(1, -1)
+#         if not rowvar and examples.size(0) != 1:
+#             examples = examples.t()
+#         factor = 1.0 / (examples.size(1) - 1)
+#         if inplace:
+#             examples -= torch.mean(examples, dim=1, keepdim=True)
+#         else:
+#             examples = examples - torch.mean(examples, dim=1, keepdim=True)
+#         examples_t = examples.t()
+#         cov_matrix = factor * examples.matmul(examples_t)
+#
+#         if ops_counter:
+#             torch.cuda.synchronize()
+#             ops_counter.log_time(time.time() - t1)
+#             ops_counter.add_macs(examples.size(0) * examples.size(1)) # computing mean
+#             ops_counter.add_macs(1) # computing factor
+#             ops_counter.add_macs(examples.size(0)**2 * examples.size(1)) # computing matmul
+#             ops_counter.add_macs(examples.size(0) * examples.size(1)) # computing factor*cov_matrix
+#
+#         return cov_matrix
+#
+#     def get_type(self):
+#         return 'mahalanobis'
