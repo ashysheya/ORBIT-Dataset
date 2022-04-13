@@ -39,7 +39,7 @@ from data.dataloaders import DataLoader
 from models.few_shot_recognisers import MultiStepFewShotRecogniser
 from utils.args import parse_args
 from utils.ops_counter import OpsCounter
-from utils.optim import cross_entropy, nll_loss, init_optimizer
+from utils.optim import cross_entropy, init_optimizer
 from utils.data import unpack_task, attach_frame_history
 from utils.logging import print_and_log, get_log_files, stats_to_str
 from utils.eval_metrics import TrainEvaluator, ValidationEvaluator, TestEvaluator
@@ -77,8 +77,7 @@ class Learner:
         self.init_dataset()
         self.init_evaluators()
         self.model = self.init_model()
-        # self.loss = cross_entropy
-        self.loss = nll_loss
+        self.loss = cross_entropy
 
     def init_dataset(self):
 

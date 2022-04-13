@@ -291,8 +291,7 @@ class MahalanobisClassifier(HeadClassifier):
 
 
         covariance_matrix = F.relu(self.task_cov_weight) * task_covariance_estimate + \
-                            F.relu(self.cov_reg_weight) * torch.eye(context_features.size(1),
-                                                                    context_features.size(1)).cuda(0)
+                            F.relu(self.cov_reg_weight) * torch.eye(context_features.size(1), context_features.size(1)).cuda(0)
 
         if ops_counter:
             ops_counter.add_macs(task_covariance_estimate.size(0) * task_covariance_estimate.size(1)) # lambda_k_tau * class_covariance_estimate
@@ -365,6 +364,8 @@ class MahalanobisClassifier(HeadClassifier):
             examples = examples.view(1, -1)
         if not rowvar and examples.size(0) != 1:
             examples = examples.t()
+        if not rowvar and examples.size(0) == 1:
+            return 0.0
         factor = 1.0 / (examples.size(1) - 1)
         if inplace:
             examples -= torch.mean(examples, dim=1, keepdim=True)
