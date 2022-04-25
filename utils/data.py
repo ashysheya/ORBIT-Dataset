@@ -113,8 +113,9 @@ class TaskResampler:
         target_labels = clip_labels[context_idx == 0.0]
         target_labels_updated = target_labels.clone()
 
+        target_size = len(target_labels_updated)
         target_loader = get_clip_loader((clips[context_idx == 0.0], target_labels_updated), batch_size, True)
-        return context_clips_sampled, context_labels_updated, target_loader
+        return context_clips_sampled, context_labels_updated, target_loader, target_size
 
     # def resample_task(self, clips, clip_labels, batch_size):
     #     context_batch_size = batch_size*8

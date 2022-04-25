@@ -347,7 +347,7 @@ class MultiStepFewShotRecogniser(FewShotRecogniser):
         # print(context_clips.shape, context_clip_labels.shape, torch.unique(context_clip_labels))
         for j in range(self.num_grad_steps):
             if need_task_resampling:
-                sampled_context_clips, sampled_context_labels, context_clip_loader = task_resampler.resample_task(context_clips, context_clip_labels, self.batch_size)
+                sampled_context_clips, sampled_context_labels, context_clip_loader, t_size = task_resampler.resample_task(context_clips, context_clip_labels, self.batch_size)
                 sampled_context_clips = sampled_context_clips.to(self.device)
                 sampled_context_labels = sampled_context_labels.to(self.device)
             else:
@@ -365,6 +365,7 @@ class MultiStepFewShotRecogniser(FewShotRecogniser):
                 batch_context_logits = self.predict_a_batch(batch_context_clips, ops_counter=ops_counter, context=True)
                 t1 = time.time()
                 batch_context_loss = loss_fn(batch_context_logits, batch_context_labels)
+                batch_context_loss = batch_context_loss*len(batch_context_labels)/t_size
                 batch_context_loss.backward()
 
                 mean_loss += batch_context_loss.item()
