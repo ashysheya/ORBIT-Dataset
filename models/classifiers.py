@@ -260,8 +260,46 @@ class MahalanobisClassifier(HeadClassifier):
 
     def _init_layers(self):
         self.param_dict = {}
-        self.task_cov_weight = nn.Parameter(torch.tensor([0.5]), requires_grad=True)
+        self.task_cov_weight = nn.Parameter(torch.tensor([1.0]), requires_grad=True)
         self.cov_reg_weight = nn.Parameter(torch.tensor([1.0]), requires_grad=True)
+
+    # def configure(self, context_features, context_labels, ops_counter=None):
+    #     """
+    #     Function that computes a per-class distribution (mean, precision) using the context features.
+    #     :param context_features: (torch.Tensor) Context features.
+    #     :param context_labels: (torch.Tensor) Corresponding class labels for context features.
+    #     :param ops_counter: (utils.OpsCounter or None) Object that counts operations performed.
+    #     :return: Nothing.
+    #     """
+    #     assert context_features.size(0) == context_labels.size(0), "context features and labels are different sizes!"
+    #     means = []
+    #     precisions = []
+    #     task_covariance_estimate = self._estimate_cov(context_features, ops_counter)
+
+    #     for c in torch.unique(context_labels):
+    #         t1 = time.time()
+    #         # filter out feature vectors which have class c
+    #         class_features = torch.index_select(context_features, 0, self._extract_class_indices(context_labels, c))
+    #         # mean pooling examples to form class means
+    #         means.append(self._mean_pooling(class_features).squeeze())
+
+    #         if ops_counter:
+    #             torch.cuda.synchronize()
+    #             ops_counter.log_time(time.time() - t1)
+    #             ops_counter.add_macs(context_features.size(0)) # selecting class features
+    #             ops_counter.add_macs(class_features.size(0) * class_features.size(1)) # mean pooling
+
+
+    #     covariance_matrix = F.relu(self.task_cov_weight) * task_covariance_estimate + \
+    #                         F.relu(self.cov_reg_weight) * torch.eye(context_features.size(1), context_features.size(1)).cuda(0)
+
+    #     if ops_counter:
+    #         ops_counter.add_macs(task_covariance_estimate.size(0) * task_covariance_estimate.size(1)) # lambda_k_tau * class_covariance_estimate
+    #         ops_counter.add_macs(1/3*covariance_matrix.size(0) ** 3 + covariance_matrix.size(0) ** 2 - 4/3*covariance_matrix.size(0)) # computing inverse of covariance_matrix, taken from https://en.wikipedia.org/wiki/Gaussian_elimination#Computational_efficiency
+    #         # note, sum of 3 matrices to compute covariance_matrix is not included here
+
+    #     self.param_dict['means'] = (torch.stack(means))
+    #     self.param_dict['precisions'] = torch.inverse(covariance_matrix)[None]
 
     def configure(self, context_features, context_labels, ops_counter=None):
         """
@@ -273,8 +311,8 @@ class MahalanobisClassifier(HeadClassifier):
         """
         assert context_features.size(0) == context_labels.size(0), "context features and labels are different sizes!"
         means = []
-        precisions = []
-        task_covariance_estimate = self._estimate_cov(context_features, ops_counter)
+        covariances = []
+        # task_covariance_estimate = self._estimate_cov(context_features, ops_counter)
 
         for c in torch.unique(context_labels):
             t1 = time.time()
@@ -282,6 +320,7 @@ class MahalanobisClassifier(HeadClassifier):
             class_features = torch.index_select(context_features, 0, self._extract_class_indices(context_labels, c))
             # mean pooling examples to form class means
             means.append(self._mean_pooling(class_features).squeeze())
+            covariances.append(self._estimate_cov(class_features, ops_counter)*len(class_features))
 
             if ops_counter:
                 torch.cuda.synchronize()
@@ -289,7 +328,8 @@ class MahalanobisClassifier(HeadClassifier):
                 ops_counter.add_macs(context_features.size(0)) # selecting class features
                 ops_counter.add_macs(class_features.size(0) * class_features.size(1)) # mean pooling
 
-
+        task_covariance_estimate = torch.stack(covariances, dim=0).sum(dim=0)/len(context_features)
+        
         covariance_matrix = F.relu(self.task_cov_weight) * task_covariance_estimate + \
                             F.relu(self.cov_reg_weight) * torch.eye(context_features.size(1), context_features.size(1)).cuda(0)
 
@@ -365,7 +405,7 @@ class MahalanobisClassifier(HeadClassifier):
         if not rowvar and examples.size(0) != 1:
             examples = examples.t()
         if not rowvar and examples.size(0) == 1:
-            return 0.0
+            return torch.zeros(examples.size(1), examples.size(1)).cuda(0)
         factor = 1.0 / (examples.size(1) - 1)
         if inplace:
             examples -= torch.mean(examples, dim=1, keepdim=True)

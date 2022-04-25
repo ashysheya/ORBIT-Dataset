@@ -341,6 +341,7 @@ class MultiStepFewShotRecogniser(FewShotRecogniser):
 
         self.configure_classifier(num_classes, init_zeros=True)
         self.configure_feature_adapter()
+
         inner_loop_optimizer = init_optimizer(self, lr, optimizer_type, extractor_scale_factor)
         # scheduler = torch.optim.lr_scheduler.StepLR(inner_loop_optimizer, step_size=50, gamma=0.1)
         # print(context_clips.shape, context_clip_labels.shape, torch.unique(context_clip_labels))

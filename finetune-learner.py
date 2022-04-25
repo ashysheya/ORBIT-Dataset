@@ -266,6 +266,7 @@ class Learner:
             # if this is a user's first task, cache their target videos (as they remain constant for all their tasks - ie. num_test_tasks_per_user)
             if step % self.args.test_tasks_per_user == 0:
                 cached_target_frames_by_video, cached_target_paths_by_video, cached_target_labels_by_video = target_frames_by_video, target_paths_by_video, target_labels_by_video
+            
 
             # initialise finetuner model to initial state of self.model for current task
             finetuner = self.init_finetuner()

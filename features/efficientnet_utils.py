@@ -566,6 +566,12 @@ def load_pretrained_weights(model, model_name, weights_path=None, load_fc=True, 
     """
     if isinstance(weights_path, str):
         state_dict = torch.load(weights_path)
+        if 'feature_extractor' in list(state_dict.keys())[0]:
+            new_state_dict = {}
+            for key in state_dict:
+                if 'feature_extractor' in key:
+                    new_state_dict[key[18:]] = state_dict[key]
+            state_dict = new_state_dict
     else:
         # AutoAugment or Advprop (different preprocessing)
         url_map_ = url_map_advprop if advprop else url_map
