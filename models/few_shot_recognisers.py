@@ -41,6 +41,7 @@ from models.set_encoder import SetEncoder, NullSetEncoder
 from models.classifiers import LinearClassifier, VersaClassifier, PrototypicalClassifier, MahalanobisClassifier
 from utils.optim import init_optimizer
 from utils.data import get_clip_loader, TaskResampler
+from tqdm import tqdm
 
 
 class FewShotRecogniser(nn.Module):
@@ -168,7 +169,6 @@ class FewShotRecogniser(nn.Module):
                 batch_features = self.feature_extractor(batch_clips, feature_adapter_params).cuda(0)
             else:
                 batch_features = self.feature_extractor(batch_clips, feature_adapter_params)
-
             if ops_counter:
                 torch.cuda.synchronize()
                 ops_counter.log_time(time.time() - t1)
@@ -331,6 +331,7 @@ class MultiStepFewShotRecogniser(FewShotRecogniser):
         """
         lr, loss_fn, optimizer_type, extractor_scale_factor = learning_args
         num_classes = len(torch.unique(context_clip_labels))
+        ops_counter = None
 
         if self.classifier.get_type() == 'mahalanobis' or self.classifier.get_type() == 'proto':
             need_task_resampling = True
